@@ -1,6 +1,7 @@
 require("dotenv").config();
 
 const axios = require("axios");
+
 const {
     TelegramClient
 } = require("telegram");
@@ -21,30 +22,36 @@ const {
 const API_ID = Number(process.env.TELEGRAM_API_ID);
 const API_HASH = process.env.TELEGRAM_API_HASH;
 
-const TELEGRAM_SESSION = process.env.TELEGRAM_SESSION;
+const TELEGRAM_SESSION =
+    process.env.TELEGRAM_SESSION;
 
 const TELEGRAM_CHANNEL =
     process.env.TELEGRAM_CHANNEL || "ipo_Alarm";
 
-const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const WEBHOOK_URL =
+    process.env.WEBHOOK_URL;
 
 const WEBHOOK_SECRET =
     process.env.WEBHOOK_SECRET || "";
 
-const HEARTBEAT_INTERVAL =
-    Number(process.env.HEARTBEAT_INTERVAL_MS) ||
-    60 * 1000;
+const HEARTBEAT_INTERVAL_MS =
+    Number(
+        process.env.HEARTBEAT_INTERVAL_MS
+    ) || 60 * 1000;
 
-const WEBHOOK_TIMEOUT =
-    Number(process.env.WEBHOOK_TIMEOUT_MS) ||
-    15000;
+const WEBHOOK_TIMEOUT_MS =
+    Number(
+        process.env.WEBHOOK_TIMEOUT_MS
+    ) || 15 * 1000;
 
 const WEBHOOK_RETRIES =
-    Number(process.env.WEBHOOK_RETRIES) || 3;
+    Number(
+        process.env.WEBHOOK_RETRIES
+    ) || 3;
 
 
 // ============================================================
-// VALIDATION
+// VALIDATE ENVIRONMENT
 // ============================================================
 
 function validateEnvironment() {
@@ -56,28 +63,33 @@ function validateEnvironment() {
         "WEBHOOK_URL"
     ];
 
-    const missing = required.filter(
-        key => !process.env[key]
-    );
+    const missing =
+        required.filter(
+            key => !process.env[key]
+        );
 
     if (missing.length > 0) {
 
         console.error(
-            "Missing environment variables:",
-            missing.join(", ")
+            `[FATAL] Missing environment variables: ${missing.join(", ")}`
         );
 
         process.exit(1);
     }
 
-    if (!Number.isInteger(API_ID) || API_ID <= 0) {
+
+    if (
+        !Number.isInteger(API_ID) ||
+        API_ID <= 0
+    ) {
 
         console.error(
-            "TELEGRAM_API_ID is invalid."
+            "[FATAL] TELEGRAM_API_ID is invalid."
         );
 
         process.exit(1);
     }
+
 
     try {
 
@@ -86,7 +98,7 @@ function validateEnvironment() {
     } catch {
 
         console.error(
-            "WEBHOOK_URL is invalid."
+            "[FATAL] WEBHOOK_URL is invalid."
         );
 
         process.exit(1);
@@ -98,24 +110,22 @@ function validateEnvironment() {
 // TELEGRAM CLIENT
 // ============================================================
 
-const session = new StringSession(
-    TELEGRAM_SESSION
-);
+const session =
+    new StringSession(
+        TELEGRAM_SESSION
+    );
 
-const client = new TelegramClient(
-    session,
-    API_ID,
-    API_HASH,
-    {
-        connectionRetries: 10,
 
-        // Keep Telegram connection reasonably active.
-        autoReconnect: true,
-
-        // Optional logging level.
-        baseLogger: undefined
-    }
-);
+const client =
+    new TelegramClient(
+        session,
+        API_ID,
+        API_HASH,
+        {
+            connectionRetries: 10,
+            autoReconnect: true
+        }
+    );
 
 
 // ============================================================
@@ -126,46 +136,27 @@ let channelEntity = null;
 
 let channelId = null;
 
-let isShuttingDown = false;
-
 let heartbeatTimer = null;
+
+let shuttingDown = false;
+
+let reconnecting = false;
 
 let lastMessageId = null;
 
+let lastMessageAt = null;
 
-// Keep recently processed message IDs.
-// This protects against duplicate processing after reconnects.
-const processedMessages = new Map();
+
+// ============================================================
+// DUPLICATE PROTECTION
+// ============================================================
+
+const processedMessages =
+    new Map();
 
 const PROCESSED_MESSAGE_TTL =
-    10 * 60 * 1000; // 10 minutes
+    30 * 60 * 1000;
 
-
-// ============================================================
-// LOGGING
-// ============================================================
-
-function log(...args) {
-
-    console.log(
-        `[${new Date().toISOString()}]`,
-        ...args
-    );
-}
-
-
-function error(...args) {
-
-    console.error(
-        `[${new Date().toISOString()}]`,
-        ...args
-    );
-}
-
-
-// ============================================================
-// MESSAGE DEDUPLICATION
-// ============================================================
 
 function getMessageKey(message) {
 
@@ -173,11 +164,14 @@ function getMessageKey(message) {
 }
 
 
-function alreadyProcessed(message) {
+function isDuplicate(message) {
 
-    const key = getMessageKey(message);
+    const key =
+        getMessageKey(message);
 
-    if (processedMessages.has(key)) {
+    if (
+        processedMessages.has(key)
+    ) {
 
         return true;
     }
@@ -193,21 +187,47 @@ function alreadyProcessed(message) {
 
 function cleanupProcessedMessages() {
 
-    const now = Date.now();
+    const now =
+        Date.now();
 
-    for (const [
-        key,
-        timestamp
-    ] of processedMessages.entries()) {
+    for (
+        const [
+            key,
+            timestamp
+        ] of processedMessages
+    ) {
 
         if (
             now - timestamp >
             PROCESSED_MESSAGE_TTL
         ) {
 
-            processedMessages.delete(key);
+            processedMessages.delete(
+                key
+            );
         }
     }
+}
+
+
+// ============================================================
+// LOGGING
+// ============================================================
+
+function log(message) {
+
+    console.log(
+        `[${new Date().toISOString()}] ${message}`
+    );
+}
+
+
+function logError(message, error = null) {
+
+    console.error(
+        `[${new Date().toISOString()}] ${message}`,
+        error || ""
+    );
 }
 
 
@@ -225,18 +245,14 @@ function getMediaInfo(message) {
         };
     }
 
-    const media = message.media;
-
-    let type = "unknown";
-
-    if (media.className) {
-
-        type = media.className;
-    }
 
     return {
+
         hasMedia: true,
-        type
+
+        type:
+            message.media.className ||
+            "unknown"
     };
 }
 
@@ -245,27 +261,43 @@ function getMediaInfo(message) {
 // TELEGRAM MESSAGE URL
 // ============================================================
 
-function buildMessageUrl(
+function getMessageUrl(
     channel,
     messageId
 ) {
 
-    if (!channel) {
+    if (
+        !channel?.username
+    ) {
 
         return null;
     }
 
-    if (channel.username) {
 
-        return `https://t.me/${channel.username}/${messageId}`;
-    }
-
-    return null;
+    return (
+        `https://t.me/${channel.username}/${messageId}`
+    );
 }
 
 
 // ============================================================
-// WEBHOOK REQUEST
+// SLEEP
+// ============================================================
+
+function sleep(ms) {
+
+    return new Promise(
+        resolve =>
+            setTimeout(
+                resolve,
+                ms
+            )
+    );
+}
+
+
+// ============================================================
+// SEND WEBHOOK
 // ============================================================
 
 async function sendWebhook(
@@ -273,6 +305,7 @@ async function sendWebhook(
 ) {
 
     let lastError = null;
+
 
     for (
         let attempt = 1;
@@ -286,12 +319,14 @@ async function sendWebhook(
                 `Webhook attempt ${attempt}/${WEBHOOK_RETRIES}`
             );
 
+
             const headers = {
+
                 "Content-Type":
                     "application/json",
 
                 "User-Agent":
-                    "Telegram-MTProto-Monitor/1.0",
+                    "IPO-Alarm-Telegram-Monitor/1.0",
 
                 "X-Telegram-Monitor":
                     "ipo-alarm"
@@ -314,7 +349,7 @@ async function sendWebhook(
                         headers,
 
                         timeout:
-                            WEBHOOK_TIMEOUT,
+                            WEBHOOK_TIMEOUT_MS,
 
                         validateStatus:
                             () => true
@@ -335,21 +370,23 @@ async function sendWebhook(
             }
 
 
-            lastError = new Error(
-                `Webhook returned HTTP ${response.status}`
-            );
+            lastError =
+                new Error(
+                    `Webhook returned HTTP ${response.status}`
+                );
 
-            error(
+
+            logError(
                 lastError.message
             );
 
-        } catch (err) {
+        } catch (error) {
 
-            lastError = err;
+            lastError =
+                error;
 
-            error(
-                "Webhook request failed:",
-                err.message
+            logError(
+                `Webhook request failed: ${error.message}`
             );
         }
 
@@ -360,37 +397,29 @@ async function sendWebhook(
         ) {
 
             const delay =
-                Math.pow(2, attempt) *
-                1000;
+                Math.pow(
+                    2,
+                    attempt
+                ) * 1000;
+
 
             log(
                 `Retrying webhook in ${delay}ms...`
             );
+
 
             await sleep(delay);
         }
     }
 
 
-    error(
-        "Webhook delivery failed after all retries:",
+    logError(
+        `Webhook failed after ${WEBHOOK_RETRIES} attempts`,
         lastError?.message
     );
 
+
     return false;
-}
-
-
-// ============================================================
-// SLEEP
-// ============================================================
-
-function sleep(ms) {
-
-    return new Promise(
-        resolve =>
-            setTimeout(resolve, ms)
-    );
 }
 
 
@@ -408,28 +437,20 @@ async function processMessage(
     }
 
 
-    // --------------------------------------------------------
-    // Ignore service messages where possible.
-    // --------------------------------------------------------
-
-    if (
-        message.action
-    ) {
+    // Ignore Telegram service messages
+    if (message.action) {
 
         log(
-            `Ignoring Telegram service message ${message.id}`
+            `Ignoring service message ${message.id}`
         );
 
         return;
     }
 
 
-    // --------------------------------------------------------
-    // Duplicate protection
-    // --------------------------------------------------------
-
+    // Prevent duplicate processing
     if (
-        alreadyProcessed(message)
+        isDuplicate(message)
     ) {
 
         log(
@@ -443,10 +464,9 @@ async function processMessage(
     lastMessageId =
         message.id;
 
+    lastMessageAt =
+        new Date();
 
-    // --------------------------------------------------------
-    // Extract message data
-    // --------------------------------------------------------
 
     const text =
         message.text ||
@@ -455,11 +475,13 @@ async function processMessage(
 
 
     const media =
-        getMediaInfo(message);
+        getMediaInfo(
+            message
+        );
 
 
     const messageUrl =
-        buildMessageUrl(
+        getMessageUrl(
             channelEntity,
             message.id
         );
@@ -467,9 +489,11 @@ async function processMessage(
 
     const payload = {
 
-        event: "telegram.channel_post",
+        event:
+            "telegram.channel_post",
 
-        source: "telegram",
+        source:
+            "telegram",
 
         receivedAt:
             new Date().toISOString(),
@@ -478,9 +502,7 @@ async function processMessage(
         channel: {
 
             id:
-                channelEntity?.id
-                    ?.toString() ||
-                null,
+                channelId,
 
             title:
                 channelEntity?.title ||
@@ -522,16 +544,12 @@ async function processMessage(
     };
 
 
-    // --------------------------------------------------------
-    // Log
-    // --------------------------------------------------------
-
     log(
         "================================================"
     );
 
     log(
-        "NEW TELEGRAM MESSAGE"
+        "NEW TELEGRAM CHANNEL POST"
     );
 
     log(
@@ -559,40 +577,23 @@ async function processMessage(
     );
 
 
-    // --------------------------------------------------------
-    // Send webhook
-    // --------------------------------------------------------
-
-    const delivered =
+    const success =
         await sendWebhook(
             payload
         );
 
 
-    if (!delivered) {
+    if (!success) {
 
-        error(
-            `Webhook delivery failed for Telegram message ${message.id}`
+        logError(
+            `Webhook delivery failed for message ${message.id}`
         );
-
-        /*
-         * Important:
-         *
-         * We don't remove the message from the
-         * processed map here.
-         *
-         * This prevents Telegram reconnects from
-         * generating duplicate webhook calls.
-         *
-         * If you need guaranteed delivery,
-         * use a persistent queue/database.
-         */
     }
 }
 
 
 // ============================================================
-// TELEGRAM CONNECTION
+// CONNECT TO TELEGRAM
 // ============================================================
 
 async function connectTelegram() {
@@ -600,6 +601,7 @@ async function connectTelegram() {
     log(
         "Connecting to Telegram..."
     );
+
 
     await client.connect();
 
@@ -621,10 +623,6 @@ async function connectTelegram() {
     );
 
 
-    // --------------------------------------------------------
-    // Resolve channel
-    // --------------------------------------------------------
-
     channelEntity =
         await client.getEntity(
             TELEGRAM_CHANNEL
@@ -632,7 +630,8 @@ async function connectTelegram() {
 
 
     channelId =
-        channelEntity.id?.toString();
+        channelEntity.id
+            ?.toString();
 
 
     log(
@@ -666,14 +665,14 @@ async function connectTelegram() {
 
 
 // ============================================================
-// REGISTER TELEGRAM EVENT LISTENER
+// REGISTER MESSAGE LISTENER
 // ============================================================
 
 function registerMessageListener() {
 
     client.addEventHandler(
 
-        async (event) => {
+        async event => {
 
             try {
 
@@ -681,20 +680,22 @@ function registerMessageListener() {
                     event.message
                 );
 
-            } catch (err) {
+            } catch (error) {
 
-                error(
-                    "Error processing Telegram message:",
-                    err
+                logError(
+                    "Message processing error:",
+                    error
                 );
             }
 
         },
 
         new NewMessage({
+
             chats: [
                 TELEGRAM_CHANNEL
             ]
+
         })
     );
 
@@ -702,6 +703,68 @@ function registerMessageListener() {
     log(
         `Listening for new messages from ${TELEGRAM_CHANNEL}`
     );
+}
+
+
+// ============================================================
+// RECONNECT
+// ============================================================
+
+async function reconnectTelegram() {
+
+    if (
+        reconnecting ||
+        shuttingDown
+    ) {
+
+        return;
+    }
+
+
+    reconnecting = true;
+
+
+    try {
+
+        log(
+            "Starting Telegram reconnect..."
+        );
+
+
+        try {
+
+            await client.disconnect();
+
+        } catch (error) {
+
+            logError(
+                "Disconnect error:",
+                error.message
+            );
+        }
+
+
+        await sleep(3000);
+
+
+        await connectTelegram();
+
+
+        log(
+            "Telegram reconnect successful."
+        );
+
+    } catch (error) {
+
+        logError(
+            "Telegram reconnect failed:",
+            error.message
+        );
+
+    } finally {
+
+        reconnecting = false;
+    }
 }
 
 
@@ -715,7 +778,7 @@ function startHeartbeat() {
         setInterval(
             async () => {
 
-                if (isShuttingDown) {
+                if (shuttingDown) {
 
                     return;
                 }
@@ -731,106 +794,41 @@ function startHeartbeat() {
 
 
                     log(
-                        `[HEARTBEAT] Telegram authorized=${authorized} | ` +
-                        `channel=${TELEGRAM_CHANNEL} | ` +
-                        `lastMessageId=${lastMessageId ?? "none"} | ` +
-                        `processed=${processedMessages.size}`
+                        `[HEARTBEAT] ` +
+                        `Telegram=${authorized ? "CONNECTED" : "NOT_AUTHORIZED"} | ` +
+                        `Channel=${TELEGRAM_CHANNEL} | ` +
+                        `LastMessage=${lastMessageId ?? "none"} | ` +
+                        `Processed=${processedMessages.size}`
                     );
 
 
-                    if (!authorized) {
-
-                        error(
-                            "[HEARTBEAT] Telegram authorization lost."
-                        );
+                    if (
+                        !authorized
+                    ) {
 
                         await reconnectTelegram();
                     }
 
-                } catch (err) {
+                } catch (error) {
 
-                    error(
+                    logError(
                         "[HEARTBEAT] Telegram connection check failed:",
-                        err.message
+                        error.message
                     );
+
 
                     await reconnectTelegram();
                 }
 
             },
 
-            HEARTBEAT_INTERVAL
+            HEARTBEAT_INTERVAL_MS
         );
 
 
     log(
-        `Heartbeat started: every ${HEARTBEAT_INTERVAL / 1000}s`
+        `Heartbeat started: every ${HEARTBEAT_INTERVAL_MS / 1000}s`
     );
-}
-
-
-// ============================================================
-// RECONNECT
-// ============================================================
-
-let reconnectInProgress = false;
-
-async function reconnectTelegram() {
-
-    if (reconnectInProgress) {
-
-        log(
-            "Reconnect already in progress."
-        );
-
-        return;
-    }
-
-
-    reconnectInProgress = true;
-
-
-    try {
-
-        log(
-            "Starting Telegram reconnect..."
-        );
-
-
-        try {
-
-            await client.disconnect();
-
-        } catch (err) {
-
-            error(
-                "Disconnect during reconnect failed:",
-                err.message
-            );
-        }
-
-
-        await sleep(3000);
-
-
-        await connectTelegram();
-
-
-        log(
-            "Telegram reconnect successful."
-        );
-
-    } catch (err) {
-
-        error(
-            "Telegram reconnect failed:",
-            err.message
-        );
-
-    } finally {
-
-        reconnectInProgress = false;
-    }
 }
 
 
@@ -842,13 +840,13 @@ async function shutdown(
     signal
 ) {
 
-    if (isShuttingDown) {
+    if (shuttingDown) {
 
         return;
     }
 
 
-    isShuttingDown = true;
+    shuttingDown = true;
 
 
     log(
@@ -861,6 +859,9 @@ async function shutdown(
         clearInterval(
             heartbeatTimer
         );
+
+        heartbeatTimer =
+            null;
     }
 
 
@@ -872,11 +873,11 @@ async function shutdown(
             "Telegram disconnected."
         );
 
-    } catch (err) {
+    } catch (error) {
 
-        error(
+        logError(
             "Telegram disconnect error:",
-            err.message
+            error.message
         );
     }
 
@@ -895,6 +896,7 @@ process.on(
     () => shutdown("SIGTERM")
 );
 
+
 process.on(
     "SIGINT",
     () => shutdown("SIGINT")
@@ -902,16 +904,16 @@ process.on(
 
 
 // ============================================================
-// UNHANDLED ERRORS
+// ERROR HANDLERS
 // ============================================================
 
 process.on(
     "unhandledRejection",
-    (reason) => {
+    error => {
 
-        error(
+        logError(
             "Unhandled promise rejection:",
-            reason
+            error
         );
     }
 );
@@ -919,20 +921,16 @@ process.on(
 
 process.on(
     "uncaughtException",
-    (err) => {
+    error => {
 
-        error(
+        logError(
             "Uncaught exception:",
-            err
+            error
         );
 
         /*
-         * Do not immediately process.exit().
-         *
-         * Render can restart the worker if it actually
-         * crashes, but keeping the process alive here
-         * gives us a chance to recover from transient
-         * errors.
+         * PM2 will restart the application if
+         * the process actually exits.
          */
     }
 );
@@ -953,6 +951,10 @@ async function main() {
 
     log(
         "Telegram IPO Alarm Monitor"
+    );
+
+    log(
+        "Environment: Oracle Cloud"
     );
 
     log(
@@ -982,11 +984,23 @@ async function main() {
 
 
     log(
-        "Telegram monitor is now RUNNING."
+        "================================================"
+    );
+
+    log(
+        "TELEGRAM MONITOR IS RUNNING"
+    );
+
+    log(
+        `Monitoring: @${TELEGRAM_CHANNEL}`
     );
 
     log(
         "Waiting for new channel posts..."
+    );
+
+    log(
+        "================================================"
     );
 }
 
@@ -996,19 +1010,14 @@ async function main() {
 // ============================================================
 
 main()
-    .catch(async (err) => {
+    .catch(
+        error => {
 
-        error(
-            "FATAL STARTUP ERROR:",
-            err
-        );
+            logError(
+                "FATAL STARTUP ERROR:",
+                error
+            );
 
-        /*
-         * Exit on startup failure.
-         *
-         * Render will restart the worker according
-         * to the service's restart behavior.
-         */
-
-        process.exit(1);
-    });
+            process.exit(1);
+        }
+    );
